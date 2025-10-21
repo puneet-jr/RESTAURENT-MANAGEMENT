@@ -239,7 +239,7 @@ router.get("/:restaurantId/reviews", checkRestaurantExists, async (req: Request<
         const reviewKey = reviewKeyById(restaurantId);
         const reviewIds = await client.lRange(reviewKey, start, end);
 
-      // Update the GET reviews endpoint around line 95:
+    
 
     const reviews = await Promise.all(
     reviewIds.map(async (id) => {
