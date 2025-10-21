@@ -11,14 +11,24 @@ import { ReviewSchema } from '../schemas/review.js';
 import { cuisinesKey, cuisineKey, restaurantCuisinesKeyById } from '../utils/keys.js';
 import { errorResponse } from '../utils/responses.js';
 import { restaurentsByRatingKey } from '../utils/keys.js';
+import { weatherKeyById } from '../utils/keys.js';
+import { restaurantDetailsKeyById } from '../utils/keys.js';
+import { indexKey } from '../utils/keys.js';
+import dotenv from 'dotenv';
+import { bloomKey } from '../utils/keys.js';
+import json from 'body-parser';
+import { check } from 'zod';
 
+
+
+dotenv.config();
 const router = express.Router();
 
 
 router.get("/", async (req, res, next) => {
     const { page = 1, limit = 10 } = req.query;
     const start = (Number(page) - 1) * Number(limit);
-    const end = start + Number(limit) - 1; // ✅ Fix 1: ZRANGE is inclusive, so end should be -1
+    const end = start + Number(limit) - 1; 
     
     try {
         const client = await initializeRedisClient();
@@ -67,12 +77,56 @@ router.get("/", async (req, res, next) => {
     }
 });
 
+
+
+
+
+router.post("/:restaurantId/details", checkRestaurantExists, async (req: Request<{ restaurantId: string }>, res, next) => {
+    const { restaurantId } = req.params;
+    const data = req.body;
+
+    try {
+        const client = await initializeRedisClient();
+        const restaurantDetailsKey = restaurantDetailsKeyById(restaurantId);
+        await client.json.set(restaurantDetailsKey, ".", data);
+
+        return successResponse(res, data, "Added restaurant details successfully");
+    } catch (error) {
+        next(error);
+    }
+});
+
+
+router.get("/:restaurantId/details", checkRestaurantExists, async (req: Request<{ restaurantId: string }>, res, next) => {
+    const { restaurantId } = req.params;
+    try {
+        const client = await initializeRedisClient();
+        const restaurantDetailsKey = restaurantDetailsKeyById(restaurantId);
+        const details = await client.json.get(restaurantDetailsKey);
+        if (!details) {
+            return errorResponse(res, 404, "Restaurant details not found");
+        }
+        return successResponse(res, details, "Fetched restaurant details successfully");
+    } catch (error) {
+        next(error);
+    }
+});
+
+
 router.post("/", validate(RestaurantSchema), async (req, res, next) => {
   const data = req.body as Restaurant;
   try {
     const client = await initializeRedisClient();
     const id = nanoid();
     const restaurantKey = restaurantKeyById(id);
+
+    const bloomString=`${data.name}|${data.location}}`;
+    const seemBefore=await client.bf.exists(bloomKey,bloomString);
+    if(seemBefore){
+        return errorResponse(res,400,"Restaurant seems to be duplicate");
+    }
+
+
     
     const hashData = { id, name: data.name, location: data.location };
     
@@ -85,7 +139,8 @@ router.post("/", validate(RestaurantSchema), async (req, res, next) => {
             ])
         ),
         client.hSet(restaurantKey, hashData),
-        client.zAdd(restaurentsByRatingKey, {score:0,value:id}) // Initial rating is 0
+        client.zAdd(restaurentsByRatingKey, {score:0,value:id}),
+        client.bf.add(bloomKey,bloomString) // Initial rating is 0
     ])
 
      
@@ -95,6 +150,23 @@ router.post("/", validate(RestaurantSchema), async (req, res, next) => {
   }
 });
 
+
+router.get("/search",async(req,res,next)=>{
+
+    const {q}=req.query;
+
+    try{
+        const client=await initializeRedisClient();
+
+        const results=await client.ft.search(indexKey,`@namee:${q}*`);
+        return successResponse(res,results);
+         
+    }catch(error){
+        next(error);
+    }
+
+
+})
 
 // GET restaurant details with view count
 router.get("/:restaurantId", checkRestaurantExists, async (req: Request<{ restaurantId: string }>, res: Response, next: NextFunction) => {
@@ -189,6 +261,46 @@ router.get("/:restaurantId/reviews", checkRestaurantExists, async (req: Request<
     }
 });
 
+router.get("/:restaurantId/weather", checkRestaurantExists, async (req: Request<{ restaurantId: string }>, res, next) => {
+    const { restaurantId } = req.params;
+
+    try {
+        const client = await initializeRedisClient();
+        const restaurantKey = restaurantKeyById(restaurantId);
+        const cachedWeather= await client.get(weatherKeyById(restaurantId));
+
+        if(cachedWeather){
+            return successResponse(res, JSON.parse(cachedWeather), 'cache HIT');
+        }
+
+
+
+        //  Get latitude and longitude separately
+        const [latitude, longitude] = await Promise.all([
+            client.hGet(restaurantKey, 'latitude'),
+            client.hGet(restaurantKey, 'longitude')
+        ]);
+
+        if (!latitude || !longitude) {
+            return errorResponse(res, 404, 'Coordinates not found for restaurant');
+        }
+
+        const apiResponse = await fetch(
+            `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=${process.env.WEATHER_API_KEY}&units=metric`
+        );
+        
+        if (apiResponse.status === 200) {
+            const json = await apiResponse.json();
+            await client.set(weatherKeyById(restaurantId), JSON.stringify(json),{EX: 60});
+            return successResponse(res, json, 'Weather data fetched successfully');
+        } else {
+            return errorResponse(res, apiResponse.status, 'Failed to fetch weather data');
+        }
+
+    } catch (error) {
+        next(error);
+    }
+});
 
 // DELETE a review
 router.delete("/:restaurantId/reviews/:reviewId", checkRestaurantExists, async (req: Request<{ restaurantId: string; reviewId: string }>, res: Response, next: NextFunction) => {
