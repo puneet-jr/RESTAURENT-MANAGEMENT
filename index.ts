@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use("/restaurents", restaurentRouter);
-app.use("/cusines", cusinesRouter);
+app.use("/cuisines", cusinesRouter);
 
 
 app.use(errorHandler);
